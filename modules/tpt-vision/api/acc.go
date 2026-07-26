@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -153,18 +154,19 @@ func (h *ACCHandler) GetClaimFHIR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: retrieve claim from DB
-	// For now, return a placeholder
-	writeJSON(w, http.StatusOK, map[string]any{
-		"resourceType": "OperationOutcome",
-		"issue": []map[string]any{
-			{
-				"severity": "information",
-				"code":     "not-implemented",
-				"details": map[string]any{
-					"text": "FHIR endpoint - implement DB retrieval",
-				},
-			},
-		},
-	})
+	// Serve the stored FHIR R5 Claim resource.
+	ctx := r.Context()
+	var fhirRaw json.RawMessage
+	err := h.pool.QueryRow(ctx,
+		`SELECT fhir_resource FROM vision_acc_claims WHERE id=$1`,
+		claimId,
+	).Scan(&fhirRaw)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Code: "DB_ERROR", Message: "failed to fetch FHIR claim"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(fhirRaw)
 }

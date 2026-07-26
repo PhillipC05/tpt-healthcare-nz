@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -147,18 +148,19 @@ func (h *RefractionHandler) GetPrescriptionFHIR(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// TODO: retrieve prescription from DB
-	// For now, return a placeholder
-	writeJSON(w, http.StatusOK, map[string]any{
-		"resourceType": "OperationOutcome",
-		"issue": []map[string]any{
-			{
-				"severity": "information",
-				"code":     "not-implemented",
-				"details": map[string]any{
-					"text": "FHIR endpoint - implement DB retrieval",
-				},
-			},
-		},
-	})
+	// Serve the stored FHIR R5 Observation resource.
+	ctx := r.Context()
+	var fhirRaw json.RawMessage
+	err := h.pool.QueryRow(ctx,
+		`SELECT fhir_resource FROM vision_prescriptions WHERE id=$1 AND patient_nhi=$2`,
+		prescriptionId, patientNhi,
+	).Scan(&fhirRaw)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Code: "DB_ERROR", Message: "failed to fetch FHIR prescription"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(fhirRaw)
 }

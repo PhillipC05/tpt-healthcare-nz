@@ -102,13 +102,13 @@ func (s *Server) buildRoutes() *http.ServeMux {
 	physioHandler := NewPhysioHandler(s.hpiClient, s.consentStore, s.pool, s.logger)
 	physioHandler.RegisterRoutes(mux, p)
 
-	otHandler := NewOTHandler(s.hpiClient, s.consentStore)
+	otHandler := NewOTHandler(s.hpiClient, s.consentStore, s.pool, s.logger)
 	otHandler.RegisterRoutes(mux, p)
 
-	speechHandler := NewSpeechHandler(s.hpiClient, s.consentStore)
+	speechHandler := NewSpeechHandler(s.hpiClient, s.consentStore, s.pool, s.logger)
 	speechHandler.RegisterRoutes(mux, p)
 
-	podiatryHandler := NewPodiatryHandler(s.hpiClient, s.consentStore)
+	podiatryHandler := NewPodiatryHandler(s.hpiClient, s.consentStore, s.pool, s.logger)
 	podiatryHandler.RegisterRoutes(mux, p)
 
 	accHandler := NewACCHandler(s.hpiClient, s.consentStore, s.pool)

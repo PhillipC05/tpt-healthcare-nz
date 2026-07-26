@@ -3,10 +3,12 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/PhillipC05/tpt-healthcare/core/consent"
+	"github.com/PhillipC05/tpt-healthcare/core/db"
 	"github.com/PhillipC05/tpt-healthcare/core/hpi"
 	"github.com/PhillipC05/tpt-healthcare/modules/tpt-allied-health/internal/speech"
 	"github.com/google/uuid"
@@ -16,11 +18,16 @@ import (
 type SpeechHandler struct {
 	hpiClient    *hpi.Client
 	consentStore *consent.Store
+	pool         db.Pool
+	logger       *slog.Logger
 }
 
 // NewSpeechHandler creates a new speech handler.
-func NewSpeechHandler(hpiClient *hpi.Client, consentStore *consent.Store) *SpeechHandler {
-	return &SpeechHandler{hpiClient: hpiClient, consentStore: consentStore}
+func NewSpeechHandler(hpiClient *hpi.Client, consentStore *consent.Store, pool db.Pool, logger *slog.Logger) *SpeechHandler {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &SpeechHandler{hpiClient: hpiClient, consentStore: consentStore, pool: pool, logger: logger}
 }
 
 // RegisterRoutes registers speech therapy routes.
@@ -71,6 +78,11 @@ func (h *SpeechHandler) CreateAssessment(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	if err := insertDisciplineRecord(r.Context(), h.pool, h.logger, "speech_assessments", assessment.ID, assessment.PatientNHI, assessment.ClinicianID, string(assessment.Status), string(assessment.Type), "", &assessment); err != nil {
+		disciplineError(w, h.logger, "create speech assessment", err)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(assessment)
@@ -80,16 +92,19 @@ func (h *SpeechHandler) CreateAssessment(w http.ResponseWriter, r *http.Request)
 func (h *SpeechHandler) GetAssessment(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	// TODO: fetch from database; stub returns placeholder data.
-	assessment := speech.Assessment{
-		ID:          id,
-		PatientNHI:  "ABC1234",
-		ClinicianID: "clin-001",
-		Type:        speech.AssessmentLanguage,
-		Status:      speech.AssessmentCompleted,
+	body, patientNHI, err := getDisciplineRecord(r.Context(), h.pool, "speech_assessments", id)
+	if err != nil {
+		disciplineError(w, h.logger, "get speech assessment", err)
+		return
 	}
 
-	if !checkConsent(w, r, h.consentStore, assessment.PatientNHI) {
+	if !checkConsent(w, r, h.consentStore, patientNHI) {
+		return
+	}
+
+	var assessment speech.Assessment
+	if err := json.Unmarshal(body, &assessment); err != nil {
+		http.Error(w, "failed to decode record", http.StatusInternalServerError)
 		return
 	}
 
@@ -110,7 +125,24 @@ func (h *SpeechHandler) ListAssessments(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	assessments := []speech.Assessment{}
+	bodies, err := listDisciplineRecords(r.Context(), h.pool, "speech_assessments", map[string]string{
+		"patient_nhi":  patientNHI,
+		"clinician_id": clinicianID,
+		"type":         assessmentType,
+		"status":       status,
+	}, limit, offset)
+	if err != nil {
+		disciplineError(w, h.logger, "list speech assessments", err)
+		return
+	}
+
+	assessments := make([]speech.Assessment, 0, len(bodies))
+	for _, b := range bodies {
+		var a speech.Assessment
+		if json.Unmarshal(b, &a) == nil {
+			assessments = append(assessments, a)
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -149,6 +181,11 @@ func (h *SpeechHandler) UpdateAssessment(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	if err := updateDisciplineRecord(r.Context(), h.pool, "speech_assessments", id, assessment.PatientNHI, assessment.ClinicianID, string(assessment.Status), string(assessment.Type), "", &assessment); err != nil {
+		disciplineError(w, h.logger, "update speech assessment", err)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(assessment)
 }
@@ -158,7 +195,10 @@ func (h *SpeechHandler) DeleteAssessment(w http.ResponseWriter, r *http.Request)
 	if !requireAPC(w, r, h.hpiClient) {
 		return
 	}
-	_ = r.PathValue("id")
+	if err := deleteDisciplineRecord(r.Context(), h.pool, "speech_assessments", r.PathValue("id")); err != nil {
+		disciplineError(w, h.logger, "delete speech assessment", err)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -184,6 +224,11 @@ func (h *SpeechHandler) CreateTherapyPlan(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	if err := insertDisciplineRecord(r.Context(), h.pool, h.logger, "speech_therapy_plans", plan.ID, plan.PatientNHI, plan.ClinicianID, string(plan.Status), "", "", &plan); err != nil {
+		disciplineError(w, h.logger, "create speech therapy plan", err)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(plan)
@@ -193,15 +238,19 @@ func (h *SpeechHandler) CreateTherapyPlan(w http.ResponseWriter, r *http.Request
 func (h *SpeechHandler) GetTherapyPlan(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	// TODO: fetch from database; stub returns placeholder data.
-	plan := speech.TherapyPlan{
-		ID:          id,
-		PatientNHI:  "ABC1234",
-		ClinicianID: "clin-001",
-		Status:      speech.PlanStatusActive,
+	body, patientNHI, err := getDisciplineRecord(r.Context(), h.pool, "speech_therapy_plans", id)
+	if err != nil {
+		disciplineError(w, h.logger, "get speech therapy plan", err)
+		return
 	}
 
-	if !checkConsent(w, r, h.consentStore, plan.PatientNHI) {
+	if !checkConsent(w, r, h.consentStore, patientNHI) {
+		return
+	}
+
+	var plan speech.TherapyPlan
+	if err := json.Unmarshal(body, &plan); err != nil {
+		http.Error(w, "failed to decode record", http.StatusInternalServerError)
 		return
 	}
 
@@ -221,7 +270,23 @@ func (h *SpeechHandler) ListTherapyPlans(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	plans := []speech.TherapyPlan{}
+	bodies, err := listDisciplineRecords(r.Context(), h.pool, "speech_therapy_plans", map[string]string{
+		"patient_nhi":  patientNHI,
+		"clinician_id": clinicianID,
+		"status":       status,
+	}, limit, offset)
+	if err != nil {
+		disciplineError(w, h.logger, "list speech therapy plans", err)
+		return
+	}
+
+	plans := make([]speech.TherapyPlan, 0, len(bodies))
+	for _, b := range bodies {
+		var p speech.TherapyPlan
+		if json.Unmarshal(b, &p) == nil {
+			plans = append(plans, p)
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -259,6 +324,11 @@ func (h *SpeechHandler) UpdateTherapyPlan(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	if err := updateDisciplineRecord(r.Context(), h.pool, "speech_therapy_plans", id, plan.PatientNHI, plan.ClinicianID, string(plan.Status), "", "", &plan); err != nil {
+		disciplineError(w, h.logger, "update speech therapy plan", err)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(plan)
 }
@@ -285,6 +355,11 @@ func (h *SpeechHandler) CreateSessionNote(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	if err := insertDisciplineRecord(r.Context(), h.pool, h.logger, "speech_session_notes", note.ID, note.PatientNHI, note.ClinicianID, "", "", "", &note); err != nil {
+		disciplineError(w, h.logger, "create speech session note", err)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(note)
@@ -294,22 +369,19 @@ func (h *SpeechHandler) CreateSessionNote(w http.ResponseWriter, r *http.Request
 func (h *SpeechHandler) GetSessionNote(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	// TODO: fetch from database; stub returns placeholder data.
-	note := speech.SessionNote{
-		ID:              id,
-		PatientNHI:      "ABC1234",
-		ClinicianID:     "clin-001",
-		SessionDate:     time.Now().UnixMilli(),
-		SessionNumber:   1,
-		Setting:         "clinic",
-		Subjective:      "Parent reports improved vocabulary use at home",
-		Objective:       "Produced 8/10 target words correctly",
-		Assessment:      "Progressing well with articulation goals",
-		Plan:            "Continue articulation therapy, increase complexity",
-		DurationMinutes: 45,
+	body, patientNHI, err := getDisciplineRecord(r.Context(), h.pool, "speech_session_notes", id)
+	if err != nil {
+		disciplineError(w, h.logger, "get speech session note", err)
+		return
 	}
 
-	if !checkConsent(w, r, h.consentStore, note.PatientNHI) {
+	if !checkConsent(w, r, h.consentStore, patientNHI) {
+		return
+	}
+
+	var note speech.SessionNote
+	if err := json.Unmarshal(body, &note); err != nil {
+		http.Error(w, "failed to decode record", http.StatusInternalServerError)
 		return
 	}
 
@@ -328,7 +400,21 @@ func (h *SpeechHandler) ListSessionNotes(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	notes := []speech.SessionNote{}
+	bodies, err := listDisciplineRecords(r.Context(), h.pool, "speech_session_notes", map[string]string{
+		"patient_nhi": patientNHI,
+	}, limit, offset)
+	if err != nil {
+		disciplineError(w, h.logger, "list speech session notes", err)
+		return
+	}
+
+	notes := make([]speech.SessionNote, 0, len(bodies))
+	for _, b := range bodies {
+		var n speech.SessionNote
+		if json.Unmarshal(b, &n) == nil {
+			notes = append(notes, n)
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -365,6 +451,11 @@ func (h *SpeechHandler) UpdateSessionNote(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	if err := updateDisciplineRecord(r.Context(), h.pool, "speech_session_notes", id, note.PatientNHI, note.ClinicianID, "", "", "", &note); err != nil {
+		disciplineError(w, h.logger, "update speech session note", err)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(note)
 }
@@ -391,6 +482,11 @@ func (h *SpeechHandler) CreateSwallowingAssessment(w http.ResponseWriter, r *htt
 		return
 	}
 
+	if err := insertDisciplineRecord(r.Context(), h.pool, h.logger, "speech_swallowing_assessments", assessment.ID, assessment.PatientNHI, assessment.ClinicianID, string(assessment.Status), "", "", &assessment); err != nil {
+		disciplineError(w, h.logger, "create speech swallowing assessment", err)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(assessment)
@@ -400,17 +496,19 @@ func (h *SpeechHandler) CreateSwallowingAssessment(w http.ResponseWriter, r *htt
 func (h *SpeechHandler) GetSwallowingAssessment(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	// TODO: fetch from database; stub returns placeholder data.
-	assessment := speech.SwallowingAssessment{
-		ID:                  id,
-		PatientNHI:          "ABC1234",
-		ClinicianID:         "clin-001",
-		Date:                time.Now().UnixMilli(),
-		Status:              speech.AssessmentCompleted,
-		DietRecommendations: "IDDSI Level 4 (Pureed) / Level 0 (Thin)",
+	body, patientNHI, err := getDisciplineRecord(r.Context(), h.pool, "speech_swallowing_assessments", id)
+	if err != nil {
+		disciplineError(w, h.logger, "get speech swallowing assessment", err)
+		return
 	}
 
-	if !checkConsent(w, r, h.consentStore, assessment.PatientNHI) {
+	if !checkConsent(w, r, h.consentStore, patientNHI) {
+		return
+	}
+
+	var assessment speech.SwallowingAssessment
+	if err := json.Unmarshal(body, &assessment); err != nil {
+		http.Error(w, "failed to decode record", http.StatusInternalServerError)
 		return
 	}
 
@@ -429,7 +527,22 @@ func (h *SpeechHandler) ListSwallowingAssessments(w http.ResponseWriter, r *http
 		return
 	}
 
-	assessments := []speech.SwallowingAssessment{}
+	bodies, err := listDisciplineRecords(r.Context(), h.pool, "speech_swallowing_assessments", map[string]string{
+		"patient_nhi":  patientNHI,
+		"clinician_id": clinicianID,
+	}, limit, offset)
+	if err != nil {
+		disciplineError(w, h.logger, "list speech swallowing assessments", err)
+		return
+	}
+
+	assessments := make([]speech.SwallowingAssessment, 0, len(bodies))
+	for _, b := range bodies {
+		var a speech.SwallowingAssessment
+		if json.Unmarshal(b, &a) == nil {
+			assessments = append(assessments, a)
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -463,6 +576,11 @@ func (h *SpeechHandler) UpdateSwallowingAssessment(w http.ResponseWriter, r *htt
 
 	if err := assessment.Validate(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := updateDisciplineRecord(r.Context(), h.pool, "speech_swallowing_assessments", id, assessment.PatientNHI, assessment.ClinicianID, string(assessment.Status), "", "", &assessment); err != nil {
+		disciplineError(w, h.logger, "update speech swallowing assessment", err)
 		return
 	}
 

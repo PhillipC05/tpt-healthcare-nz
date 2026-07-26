@@ -1,7 +1,6 @@
 package backup
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -87,7 +86,6 @@ func (w *TriggerWorker) Work(ctx context.Context, job *river.Job[TriggerArgs]) e
 	}
 
 	// No storage provider: record a failed backup so the dashboard reflects the gap.
-	_, _ = bytes.NewReader([]byte{}), storageKey
 	w.logger.Warn("backup: no storage provider configured; recording as failed", "id", runID)
 	return w.recordFailure(ctx, runID, "no storage provider configured")
 }

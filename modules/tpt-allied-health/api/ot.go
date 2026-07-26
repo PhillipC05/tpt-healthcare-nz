@@ -3,10 +3,12 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/PhillipC05/tpt-healthcare/core/consent"
+	"github.com/PhillipC05/tpt-healthcare/core/db"
 	"github.com/PhillipC05/tpt-healthcare/core/hpi"
 	"github.com/PhillipC05/tpt-healthcare/modules/tpt-allied-health/internal/ot"
 	"github.com/google/uuid"
@@ -16,11 +18,16 @@ import (
 type OTHandler struct {
 	hpiClient    *hpi.Client
 	consentStore *consent.Store
+	pool         db.Pool
+	logger       *slog.Logger
 }
 
 // NewOTHandler creates a new OT handler.
-func NewOTHandler(hpiClient *hpi.Client, consentStore *consent.Store) *OTHandler {
-	return &OTHandler{hpiClient: hpiClient, consentStore: consentStore}
+func NewOTHandler(hpiClient *hpi.Client, consentStore *consent.Store, pool db.Pool, logger *slog.Logger) *OTHandler {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &OTHandler{hpiClient: hpiClient, consentStore: consentStore, pool: pool, logger: logger}
 }
 
 // RegisterRoutes registers OT routes.
@@ -66,6 +73,11 @@ func (h *OTHandler) CreateAssessment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := insertDisciplineRecord(r.Context(), h.pool, h.logger, "ot_assessments", assessment.ID, assessment.PatientNHI, assessment.ClinicianID, string(assessment.Status), string(assessment.Type), "", &assessment); err != nil {
+		disciplineError(w, h.logger, "create ot assessment", err)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(assessment)
@@ -75,16 +87,19 @@ func (h *OTHandler) CreateAssessment(w http.ResponseWriter, r *http.Request) {
 func (h *OTHandler) GetAssessment(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	// TODO: fetch from database; stub returns placeholder data.
-	assessment := ot.Assessment{
-		ID:          id,
-		PatientNHI:  "ABC1234",
-		ClinicianID: "clin-001",
-		Type:        ot.AssessmentADL,
-		Status:      ot.AssessmentCompleted,
+	body, patientNHI, err := getDisciplineRecord(r.Context(), h.pool, "ot_assessments", id)
+	if err != nil {
+		disciplineError(w, h.logger, "get ot assessment", err)
+		return
 	}
 
-	if !checkConsent(w, r, h.consentStore, assessment.PatientNHI) {
+	if !checkConsent(w, r, h.consentStore, patientNHI) {
+		return
+	}
+
+	var assessment ot.Assessment
+	if err := json.Unmarshal(body, &assessment); err != nil {
+		http.Error(w, "failed to decode record", http.StatusInternalServerError)
 		return
 	}
 
@@ -105,7 +120,24 @@ func (h *OTHandler) ListAssessments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	assessments := []ot.Assessment{}
+	bodies, err := listDisciplineRecords(r.Context(), h.pool, "ot_assessments", map[string]string{
+		"patient_nhi":  patientNHI,
+		"clinician_id": clinicianID,
+		"type":         assessmentType,
+		"status":       status,
+	}, limit, offset)
+	if err != nil {
+		disciplineError(w, h.logger, "list ot assessments", err)
+		return
+	}
+
+	assessments := make([]ot.Assessment, 0, len(bodies))
+	for _, b := range bodies {
+		var a ot.Assessment
+		if json.Unmarshal(b, &a) == nil {
+			assessments = append(assessments, a)
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -144,6 +176,11 @@ func (h *OTHandler) UpdateAssessment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := updateDisciplineRecord(r.Context(), h.pool, "ot_assessments", id, assessment.PatientNHI, assessment.ClinicianID, string(assessment.Status), string(assessment.Type), "", &assessment); err != nil {
+		disciplineError(w, h.logger, "update ot assessment", err)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(assessment)
 }
@@ -153,7 +190,10 @@ func (h *OTHandler) DeleteAssessment(w http.ResponseWriter, r *http.Request) {
 	if !requireAPC(w, r, h.hpiClient) {
 		return
 	}
-	_ = r.PathValue("id")
+	if err := deleteDisciplineRecord(r.Context(), h.pool, "ot_assessments", r.PathValue("id")); err != nil {
+		disciplineError(w, h.logger, "delete ot assessment", err)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -179,6 +219,11 @@ func (h *OTHandler) CreateInterventionPlan(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	if err := insertDisciplineRecord(r.Context(), h.pool, h.logger, "ot_intervention_plans", plan.ID, plan.PatientNHI, plan.ClinicianID, string(plan.Status), "", "", &plan); err != nil {
+		disciplineError(w, h.logger, "create ot intervention plan", err)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(plan)
@@ -188,15 +233,19 @@ func (h *OTHandler) CreateInterventionPlan(w http.ResponseWriter, r *http.Reques
 func (h *OTHandler) GetInterventionPlan(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	// TODO: fetch from database; stub returns placeholder data.
-	plan := ot.InterventionPlan{
-		ID:          id,
-		PatientNHI:  "ABC1234",
-		ClinicianID: "clin-001",
-		Status:      ot.PlanStatusActive,
+	body, patientNHI, err := getDisciplineRecord(r.Context(), h.pool, "ot_intervention_plans", id)
+	if err != nil {
+		disciplineError(w, h.logger, "get ot intervention plan", err)
+		return
 	}
 
-	if !checkConsent(w, r, h.consentStore, plan.PatientNHI) {
+	if !checkConsent(w, r, h.consentStore, patientNHI) {
+		return
+	}
+
+	var plan ot.InterventionPlan
+	if err := json.Unmarshal(body, &plan); err != nil {
+		http.Error(w, "failed to decode record", http.StatusInternalServerError)
 		return
 	}
 
@@ -216,7 +265,23 @@ func (h *OTHandler) ListInterventionPlans(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	plans := []ot.InterventionPlan{}
+	bodies, err := listDisciplineRecords(r.Context(), h.pool, "ot_intervention_plans", map[string]string{
+		"patient_nhi":  patientNHI,
+		"clinician_id": clinicianID,
+		"status":       status,
+	}, limit, offset)
+	if err != nil {
+		disciplineError(w, h.logger, "list ot intervention plans", err)
+		return
+	}
+
+	plans := make([]ot.InterventionPlan, 0, len(bodies))
+	for _, b := range bodies {
+		var p ot.InterventionPlan
+		if json.Unmarshal(b, &p) == nil {
+			plans = append(plans, p)
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -254,6 +319,11 @@ func (h *OTHandler) UpdateInterventionPlan(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	if err := updateDisciplineRecord(r.Context(), h.pool, "ot_intervention_plans", id, plan.PatientNHI, plan.ClinicianID, string(plan.Status), "", "", &plan); err != nil {
+		disciplineError(w, h.logger, "update ot intervention plan", err)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(plan)
 }
@@ -280,6 +350,11 @@ func (h *OTHandler) CreateSessionNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := insertDisciplineRecord(r.Context(), h.pool, h.logger, "ot_session_notes", note.ID, note.PatientNHI, note.ClinicianID, "", "", "", &note); err != nil {
+		disciplineError(w, h.logger, "create ot session note", err)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(note)
@@ -289,22 +364,19 @@ func (h *OTHandler) CreateSessionNote(w http.ResponseWriter, r *http.Request) {
 func (h *OTHandler) GetSessionNote(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	// TODO: fetch from database; stub returns placeholder data.
-	note := ot.SessionNote{
-		ID:              id,
-		PatientNHI:      "ABC1234",
-		ClinicianID:     "clin-001",
-		SessionDate:     time.Now().UnixMilli(),
-		SessionNumber:   1,
-		Location:        "clinic",
-		Subjective:      "Patient reports improved independence",
-		Objective:       "Able to complete dressing with minimal assistance",
-		Assessment:      "Progressing towards independence in ADLs",
-		Plan:            "Continue ADL retraining, introduce kitchen tasks",
-		DurationMinutes: 45,
+	body, patientNHI, err := getDisciplineRecord(r.Context(), h.pool, "ot_session_notes", id)
+	if err != nil {
+		disciplineError(w, h.logger, "get ot session note", err)
+		return
 	}
 
-	if !checkConsent(w, r, h.consentStore, note.PatientNHI) {
+	if !checkConsent(w, r, h.consentStore, patientNHI) {
+		return
+	}
+
+	var note ot.SessionNote
+	if err := json.Unmarshal(body, &note); err != nil {
+		http.Error(w, "failed to decode record", http.StatusInternalServerError)
 		return
 	}
 
@@ -323,7 +395,21 @@ func (h *OTHandler) ListSessionNotes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	notes := []ot.SessionNote{}
+	bodies, err := listDisciplineRecords(r.Context(), h.pool, "ot_session_notes", map[string]string{
+		"patient_nhi": patientNHI,
+	}, limit, offset)
+	if err != nil {
+		disciplineError(w, h.logger, "list ot session notes", err)
+		return
+	}
+
+	notes := make([]ot.SessionNote, 0, len(bodies))
+	for _, b := range bodies {
+		var n ot.SessionNote
+		if json.Unmarshal(b, &n) == nil {
+			notes = append(notes, n)
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -357,6 +443,11 @@ func (h *OTHandler) UpdateSessionNote(w http.ResponseWriter, r *http.Request) {
 
 	if err := note.Validate(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := updateDisciplineRecord(r.Context(), h.pool, "ot_session_notes", id, note.PatientNHI, note.ClinicianID, "", "", "", &note); err != nil {
+		disciplineError(w, h.logger, "update ot session note", err)
 		return
 	}
 

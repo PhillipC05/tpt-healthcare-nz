@@ -3,10 +3,12 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/PhillipC05/tpt-healthcare/core/consent"
+	"github.com/PhillipC05/tpt-healthcare/core/db"
 	"github.com/PhillipC05/tpt-healthcare/core/hpi"
 	"github.com/PhillipC05/tpt-healthcare/modules/tpt-allied-health/internal/podiatry"
 	"github.com/google/uuid"
@@ -16,11 +18,16 @@ import (
 type PodiatryHandler struct {
 	hpiClient    *hpi.Client
 	consentStore *consent.Store
+	pool         db.Pool
+	logger       *slog.Logger
 }
 
 // NewPodiatryHandler creates a new podiatry handler.
-func NewPodiatryHandler(hpiClient *hpi.Client, consentStore *consent.Store) *PodiatryHandler {
-	return &PodiatryHandler{hpiClient: hpiClient, consentStore: consentStore}
+func NewPodiatryHandler(hpiClient *hpi.Client, consentStore *consent.Store, pool db.Pool, logger *slog.Logger) *PodiatryHandler {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &PodiatryHandler{hpiClient: hpiClient, consentStore: consentStore, pool: pool, logger: logger}
 }
 
 // RegisterRoutes registers podiatry routes.
@@ -71,6 +78,11 @@ func (h *PodiatryHandler) CreateAssessment(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	if err := insertDisciplineRecord(r.Context(), h.pool, h.logger, "podiatry_assessments", assessment.ID, assessment.PatientNHI, assessment.ClinicianID, string(assessment.Status), string(assessment.Type), string(assessment.RiskCategory), &assessment); err != nil {
+		disciplineError(w, h.logger, "create podiatry assessment", err)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(assessment)
@@ -80,17 +92,19 @@ func (h *PodiatryHandler) CreateAssessment(w http.ResponseWriter, r *http.Reques
 func (h *PodiatryHandler) GetAssessment(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	// TODO: fetch from database; stub returns placeholder data.
-	assessment := podiatry.Assessment{
-		ID:           id,
-		PatientNHI:   "ABC1234",
-		ClinicianID:  "clin-001",
-		Type:         podiatry.AssessmentDiabeticFoot,
-		RiskCategory: podiatry.RiskCategoryHigh,
-		Status:       podiatry.AssessmentCompleted,
+	body, patientNHI, err := getDisciplineRecord(r.Context(), h.pool, "podiatry_assessments", id)
+	if err != nil {
+		disciplineError(w, h.logger, "get podiatry assessment", err)
+		return
 	}
 
-	if !checkConsent(w, r, h.consentStore, assessment.PatientNHI) {
+	if !checkConsent(w, r, h.consentStore, patientNHI) {
+		return
+	}
+
+	var assessment podiatry.Assessment
+	if err := json.Unmarshal(body, &assessment); err != nil {
+		http.Error(w, "failed to decode record", http.StatusInternalServerError)
 		return
 	}
 
@@ -112,7 +126,25 @@ func (h *PodiatryHandler) ListAssessments(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	assessments := []podiatry.Assessment{}
+	bodies, err := listDisciplineRecords(r.Context(), h.pool, "podiatry_assessments", map[string]string{
+		"patient_nhi":  patientNHI,
+		"clinician_id": clinicianID,
+		"type":         assessmentType,
+		"category":     riskCategory,
+		"status":       status,
+	}, limit, offset)
+	if err != nil {
+		disciplineError(w, h.logger, "list podiatry assessments", err)
+		return
+	}
+
+	assessments := make([]podiatry.Assessment, 0, len(bodies))
+	for _, b := range bodies {
+		var a podiatry.Assessment
+		if json.Unmarshal(b, &a) == nil {
+			assessments = append(assessments, a)
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -152,6 +184,11 @@ func (h *PodiatryHandler) UpdateAssessment(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	if err := updateDisciplineRecord(r.Context(), h.pool, "podiatry_assessments", id, assessment.PatientNHI, assessment.ClinicianID, string(assessment.Status), string(assessment.Type), string(assessment.RiskCategory), &assessment); err != nil {
+		disciplineError(w, h.logger, "update podiatry assessment", err)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(assessment)
 }
@@ -161,7 +198,10 @@ func (h *PodiatryHandler) DeleteAssessment(w http.ResponseWriter, r *http.Reques
 	if !requireAPC(w, r, h.hpiClient) {
 		return
 	}
-	_ = r.PathValue("id")
+	if err := deleteDisciplineRecord(r.Context(), h.pool, "podiatry_assessments", r.PathValue("id")); err != nil {
+		disciplineError(w, h.logger, "delete podiatry assessment", err)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -187,6 +227,11 @@ func (h *PodiatryHandler) CreateTreatmentPlan(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	if err := insertDisciplineRecord(r.Context(), h.pool, h.logger, "podiatry_treatment_plans", plan.ID, plan.PatientNHI, plan.ClinicianID, string(plan.Status), "", "", &plan); err != nil {
+		disciplineError(w, h.logger, "create podiatry treatment plan", err)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(plan)
@@ -196,15 +241,19 @@ func (h *PodiatryHandler) CreateTreatmentPlan(w http.ResponseWriter, r *http.Req
 func (h *PodiatryHandler) GetTreatmentPlan(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	// TODO: fetch from database; stub returns placeholder data.
-	plan := podiatry.TreatmentPlan{
-		ID:          id,
-		PatientNHI:  "ABC1234",
-		ClinicianID: "clin-001",
-		Status:      podiatry.PlanStatusActive,
+	body, patientNHI, err := getDisciplineRecord(r.Context(), h.pool, "podiatry_treatment_plans", id)
+	if err != nil {
+		disciplineError(w, h.logger, "get podiatry treatment plan", err)
+		return
 	}
 
-	if !checkConsent(w, r, h.consentStore, plan.PatientNHI) {
+	if !checkConsent(w, r, h.consentStore, patientNHI) {
+		return
+	}
+
+	var plan podiatry.TreatmentPlan
+	if err := json.Unmarshal(body, &plan); err != nil {
+		http.Error(w, "failed to decode record", http.StatusInternalServerError)
 		return
 	}
 
@@ -224,7 +273,23 @@ func (h *PodiatryHandler) ListTreatmentPlans(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	plans := []podiatry.TreatmentPlan{}
+	bodies, err := listDisciplineRecords(r.Context(), h.pool, "podiatry_treatment_plans", map[string]string{
+		"patient_nhi":  patientNHI,
+		"clinician_id": clinicianID,
+		"status":       status,
+	}, limit, offset)
+	if err != nil {
+		disciplineError(w, h.logger, "list podiatry treatment plans", err)
+		return
+	}
+
+	plans := make([]podiatry.TreatmentPlan, 0, len(bodies))
+	for _, b := range bodies {
+		var p podiatry.TreatmentPlan
+		if json.Unmarshal(b, &p) == nil {
+			plans = append(plans, p)
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -262,6 +327,11 @@ func (h *PodiatryHandler) UpdateTreatmentPlan(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	if err := updateDisciplineRecord(r.Context(), h.pool, "podiatry_treatment_plans", id, plan.PatientNHI, plan.ClinicianID, string(plan.Status), "", "", &plan); err != nil {
+		disciplineError(w, h.logger, "update podiatry treatment plan", err)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(plan)
 }
@@ -288,6 +358,11 @@ func (h *PodiatryHandler) CreateSessionNote(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	if err := insertDisciplineRecord(r.Context(), h.pool, h.logger, "podiatry_session_notes", note.ID, note.PatientNHI, note.ClinicianID, "", "", "", &note); err != nil {
+		disciplineError(w, h.logger, "create podiatry session note", err)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(note)
@@ -297,22 +372,19 @@ func (h *PodiatryHandler) CreateSessionNote(w http.ResponseWriter, r *http.Reque
 func (h *PodiatryHandler) GetSessionNote(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	// TODO: fetch from database; stub returns placeholder data.
-	note := podiatry.SessionNote{
-		ID:              id,
-		PatientNHI:      "ABC1234",
-		ClinicianID:     "clin-001",
-		SessionDate:     time.Now().UnixMilli(),
-		SessionNumber:   1,
-		Location:        "clinic",
-		Subjective:      "Patient reports reduced pain",
-		Objective:       "Wound dimensions reduced, granulating well",
-		Assessment:      "Wound healing progressing as expected",
-		Plan:            "Continue current dressing regimen, review in 1 week",
-		DurationMinutes: 30,
+	body, patientNHI, err := getDisciplineRecord(r.Context(), h.pool, "podiatry_session_notes", id)
+	if err != nil {
+		disciplineError(w, h.logger, "get podiatry session note", err)
+		return
 	}
 
-	if !checkConsent(w, r, h.consentStore, note.PatientNHI) {
+	if !checkConsent(w, r, h.consentStore, patientNHI) {
+		return
+	}
+
+	var note podiatry.SessionNote
+	if err := json.Unmarshal(body, &note); err != nil {
+		http.Error(w, "failed to decode record", http.StatusInternalServerError)
 		return
 	}
 
@@ -331,7 +403,21 @@ func (h *PodiatryHandler) ListSessionNotes(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	notes := []podiatry.SessionNote{}
+	bodies, err := listDisciplineRecords(r.Context(), h.pool, "podiatry_session_notes", map[string]string{
+		"patient_nhi": patientNHI,
+	}, limit, offset)
+	if err != nil {
+		disciplineError(w, h.logger, "list podiatry session notes", err)
+		return
+	}
+
+	notes := make([]podiatry.SessionNote, 0, len(bodies))
+	for _, b := range bodies {
+		var n podiatry.SessionNote
+		if json.Unmarshal(b, &n) == nil {
+			notes = append(notes, n)
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -368,6 +454,11 @@ func (h *PodiatryHandler) UpdateSessionNote(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	if err := updateDisciplineRecord(r.Context(), h.pool, "podiatry_session_notes", id, note.PatientNHI, note.ClinicianID, "", "", "", &note); err != nil {
+		disciplineError(w, h.logger, "update podiatry session note", err)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(note)
 }
@@ -394,6 +485,11 @@ func (h *PodiatryHandler) CreateWoundAssessment(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	if err := insertDisciplineRecord(r.Context(), h.pool, h.logger, "podiatry_wound_assessments", assessment.ID, assessment.PatientNHI, assessment.ClinicianID, string(assessment.Status), string(assessment.WoundType), string(assessment.Side), &assessment); err != nil {
+		disciplineError(w, h.logger, "create podiatry wound assessment", err)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(assessment)
@@ -403,19 +499,19 @@ func (h *PodiatryHandler) CreateWoundAssessment(w http.ResponseWriter, r *http.R
 func (h *PodiatryHandler) GetWoundAssessment(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	// TODO: fetch from database; stub returns placeholder data.
-	assessment := podiatry.WoundAssessment{
-		ID:          id,
-		PatientNHI:  "ABC1234",
-		ClinicianID: "clin-001",
-		Date:        time.Now().UnixMilli(),
-		Location:    "plantar forefoot",
-		Side:        "right",
-		WoundType:   podiatry.WoundTypeDiabeticFoot,
-		Status:      podiatry.AssessmentCompleted,
+	body, patientNHI, err := getDisciplineRecord(r.Context(), h.pool, "podiatry_wound_assessments", id)
+	if err != nil {
+		disciplineError(w, h.logger, "get podiatry wound assessment", err)
+		return
 	}
 
-	if !checkConsent(w, r, h.consentStore, assessment.PatientNHI) {
+	if !checkConsent(w, r, h.consentStore, patientNHI) {
+		return
+	}
+
+	var assessment podiatry.WoundAssessment
+	if err := json.Unmarshal(body, &assessment); err != nil {
+		http.Error(w, "failed to decode record", http.StatusInternalServerError)
 		return
 	}
 
@@ -435,7 +531,23 @@ func (h *PodiatryHandler) ListWoundAssessments(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	assessments := []podiatry.WoundAssessment{}
+	bodies, err := listDisciplineRecords(r.Context(), h.pool, "podiatry_wound_assessments", map[string]string{
+		"patient_nhi":  patientNHI,
+		"clinician_id": clinicianID,
+		"type":         woundType,
+	}, limit, offset)
+	if err != nil {
+		disciplineError(w, h.logger, "list podiatry wound assessments", err)
+		return
+	}
+
+	assessments := make([]podiatry.WoundAssessment, 0, len(bodies))
+	for _, b := range bodies {
+		var a podiatry.WoundAssessment
+		if json.Unmarshal(b, &a) == nil {
+			assessments = append(assessments, a)
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -470,6 +582,11 @@ func (h *PodiatryHandler) UpdateWoundAssessment(w http.ResponseWriter, r *http.R
 
 	if err := assessment.Validate(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := updateDisciplineRecord(r.Context(), h.pool, "podiatry_wound_assessments", id, assessment.PatientNHI, assessment.ClinicianID, string(assessment.Status), string(assessment.WoundType), string(assessment.Side), &assessment); err != nil {
+		disciplineError(w, h.logger, "update podiatry wound assessment", err)
 		return
 	}
 

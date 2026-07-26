@@ -474,11 +474,34 @@ func (c *mllpConverter) publishNotification(ctx context.Context, rep convertedRe
 	return nil
 }
 
-// resolveTenant returns a tenantID for MLLP messages. In production, the
-// ZNZL LabSite field (or MSH-4) should be mapped to a tenant UUID at
-// onboarding. This stub returns the zero UUID as a safe default.
+// resolveTenant returns the tenantID that owns an inbound MLLP message. The
+// sending lab is identified by MSH-4 (Sending Facility) and, when present, the
+// ZNZL LabSite segment. These site codes are mapped to tenants at onboarding
+// via the tenant_lab_sites table. Unknown senders fall back to the zero UUID
+// (shared default tenant) rather than being silently dropped.
 func (c *mllpConverter) resolveTenant(msg *hl7.Message) string {
-	// TODO: look up tenant by lab site code in a configured mapping table.
+	siteCodes := []string{strings.TrimSpace(msg.GetField("MSH", "4"))}
+	if znzl, ok := msg.GetSegment("ZNZL"); ok {
+		if v, ok := znzl["LabSite"]; ok && len(v) > 0 {
+			siteCodes = append(siteCodes, strings.TrimSpace(v[0]))
+		}
+	}
+
+	for _, site := range siteCodes {
+		if site == "" {
+			continue
+		}
+		var tenantID string
+		err := c.pool.QueryRow(context.Background(),
+			`SELECT tenant_id FROM tenant_lab_sites WHERE lab_site = $1`, site,
+		).Scan(&tenantID)
+		if err == nil && tenantID != "" {
+			return tenantID
+		}
+	}
+
+	c.logger.Warn("mllp: no tenant mapping for lab site; defaulting to nil tenant",
+		slog.String("sites", strings.Join(siteCodes, ",")))
 	return uuid.Nil.String()
 }
 

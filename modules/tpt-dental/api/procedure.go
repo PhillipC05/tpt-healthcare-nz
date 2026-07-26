@@ -12,6 +12,7 @@ import (
 	"github.com/PhillipC05/tpt-healthcare/core/db"
 	"github.com/PhillipC05/tpt-healthcare/core/encryption"
 	"github.com/PhillipC05/tpt-healthcare/modules/tpt-dental/internal/procedure"
+	"github.com/google/uuid"
 )
 
 // ProcedureHandler handles dental procedure code lookup and treatment record CRUD.
@@ -117,8 +118,23 @@ func (h *ProcedureHandler) ListRecords(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Simplified stub — real implementation queries DB.
-	records := []TreatmentRecord{}
+	limit, offset := parsePagination(r)
+
+	bodies, err := jsonbList(r.Context(), h.pool, "dental_treatment_records", map[string]string{
+		"patient_nhi": patientNhi,
+	}, limit, offset)
+	if err != nil {
+		jsonbError(w, h.logger, "list treatment records", err)
+		return
+	}
+
+	records := make([]TreatmentRecord, 0, len(bodies))
+	for _, b := range bodies {
+		var rec TreatmentRecord
+		if json.Unmarshal(b, &rec) == nil {
+			records = append(records, rec)
+		}
+	}
 	writeJSON(w, http.StatusOK, records)
 }
 
@@ -146,10 +162,16 @@ func (h *ProcedureHandler) CreateRecord(w http.ResponseWriter, r *http.Request) 
 	}
 
 	now := time.Now().UnixMilli()
+	rec.ID = uuid.New().String()
 	rec.CreatedAt = now
 	rec.UpdatedAt = now
 	if rec.PerformedAt == 0 {
 		rec.PerformedAt = now
+	}
+
+	if err := jsonbInsert(r.Context(), h.pool, h.logger, "dental_treatment_records", rec.ID, rec.PatientNHI, rec.ClinicianID, "", &rec); err != nil {
+		jsonbError(w, h.logger, "create treatment record", err)
+		return
 	}
 
 	h.logger.Info("treatment record created",
@@ -172,10 +194,17 @@ func (h *ProcedureHandler) GetRecord(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Simplified stub — real implementation queries DB.
-	writeJSON(w, http.StatusNotFound, apiError{
-		Code: "NOT_FOUND", Message: "Treatment record not found",
-	})
+	body, _, err := jsonbGet(r.Context(), h.pool, "dental_treatment_records", recordID)
+	if err != nil {
+		jsonbError(w, h.logger, "get treatment record", err)
+		return
+	}
+	var rec TreatmentRecord
+	if err := json.Unmarshal(body, &rec); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Code: "DB_ERROR", Message: "failed to decode record"})
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
 }
 
 // UpdateRecord updates a treatment record.
@@ -201,6 +230,11 @@ func (h *ProcedureHandler) UpdateRecord(w http.ResponseWriter, r *http.Request) 
 	rec.ID = recordID
 	rec.PatientNHI = patientNhi
 	rec.UpdatedAt = time.Now().UnixMilli()
+
+	if err := jsonbUpdate(r.Context(), h.pool, "dental_treatment_records", recordID, rec.PatientNHI, rec.ClinicianID, "", &rec); err != nil {
+		jsonbError(w, h.logger, "update treatment record", err)
+		return
+	}
 
 	h.logger.Info("treatment record updated",
 		slog.String("record_id", recordID),

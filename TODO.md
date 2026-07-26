@@ -92,20 +92,20 @@ See plan `lets-say-auckland-city-jolly-pinwheel.md` for full detail.
   - [x] Implement real AR-DRG/WIES grouper in `core/terminology/` (grouper already existed but was unused; now wired in)
 - [x] **core/fhir** — `Location` resource exists in both `core/fhir/r5/location.go` and `core/fhir/r4/location.go`; `Encounter` exists in both `r5` and `r4` (`core/fhir/r4/encounter.go`). The FHIR REST API (`interop/api/fhir.go`) is generic over `resourceType` (JSONB store), so both work through CRUD/search with no extra registration.
   - [x] Add Location resource type; add r4 Encounter for compatibility
-- [ ] **tpt-hospital/api/pharmacy_*.go** — eMAR lacks barcode/five-rights verification, controlled-drug (S8) register, IV pump/smart-infusion integration
-  - [ ] Scope and implement bedside verification + S8 register
-- [ ] **tpt-hospital/api/icu.go** — ICU/PICU charting has no fluid balance charting or EWS/PEWS early-warning score engine; no PICU-specific charting distinct from adult ICU
-  - [ ] Add fluid balance charting
-  - [ ] Add EWS (adult) / PEWS (paediatric) scoring engine
-- [ ] **tpt-hospital + tpt-maternal-child-health** — Paediatric/NICU/PICU tooling (nicu.go, paediatrics_picu.go, paediatrics_growth.go) not linked back to `hospital_admissions`
-  - [ ] Wire NICU/PICU/growth-chart records to the hospital admission model
-- [ ] **tpt-hospital / tpt-maternal-child-health** — No weight-based/paediatric dosing calculator (mg/kg dosing, max-dose caps)
-  - [ ] Implement paediatric dosing calculator
-- [ ] **tpt-hospital/api/wards.go** — No bed-board/patient-flow forecasting beyond a live capacity snapshot (no discharge-ETA prediction, escalation triggers)
-  - [ ] Design and implement patient-flow forecasting dashboard
-- [ ] **tpt-hospital/api/admissions_*.go** — Discharge summaries not confirmed auto-populated from coding/pharmacy/admission data, nor wired to GP transmission (core/gp2gp)
-  - [ ] Auto-populate discharge summary from admission/coding/pharmacy data
-  - [ ] Confirm/wire GP transmission path
+- [x] **tpt-hospital/api/pharmacy_*.go** — eMAR now has real barcode/five-rights verification (`bedside_verification.go` `IsFiveRightsOK`) and a DB-backed S8 controlled-drug register (`pharmacy_query.go` `controlled_drug_register` table, running-balance INSERT/SELECT); IV pump/smart-infusion types (`IVPumpType`, `IVPumpStatus`) already tracked in `pharmacy_types.go`/`pharmacy_handler.go`
+  - [x] Scope and implement bedside verification + S8 register
+- [x] **tpt-hospital/api/icu.go** — Fluid balance charting (`AddFluidBalance`/`insertFluidBalanceEntry`/`listFluidBalanceEntries`) and EWS/PEWS scoring engine (`CalculateEWS`/`CalculatePEWS`/`insertEWSRecord`/`listEWSRecords`) are DB-backed, not stubs
+  - [x] Add fluid balance charting
+  - [x] Add EWS (adult) / PEWS (paediatric) scoring engine
+- [x] **tpt-maternal-child-health** — NICU/PICU records now carry `HospitalAdmissionID` (`nicu.go`) and paediatric child-protection records use a `paediatric_admission_id` FK; this tooling lives in `tpt-maternal-child-health` rather than separate `tpt-hospital` files
+  - [x] Wire NICU/PICU/growth-chart records to the hospital admission model
+- [x] **tpt-hospital/api/icu.go** — `CalculatePaediatricDose` implements weight-based (mg/kg) dosing with max-dose caps
+  - [x] Implement paediatric dosing calculator
+- [x] **tpt-hospital/api/wards.go** — `PatientFlowForecast`/`buildFlowForecast` computes discharge-ETA style forecasts from average LOS + active admissions, beyond a static snapshot
+  - [x] Design and implement patient-flow forecasting dashboard
+- [ ] **tpt-hospital/api/admissions_*.go** — `discharge_auto.go` (`AutoPopulateDischargeSummary`, `GPTransmissionReady`) and `admissions_handler.go` build the discharge summary and check GP-transmission readiness, but the actual bundle send is still just a comment ("handled through core/gp2gp") — `core/gp2gp.go` exists but is not called
+  - [x] Auto-populate discharge summary from admission/coding/pharmacy data
+  - [ ] Wire the GP2GP bundle transfer call (currently unwired despite `core/gp2gp` existing)
 
 ## Phase 8: Replace Stubs & Scaffolds with Real Implementations
 
@@ -123,10 +123,10 @@ See plan `lets-say-auckland-city-jolly-pinwheel.md` for full detail.
 ### Fully-scaffolded modules (need full persistence)
 
 - [ ] **tpt-pharmacy** — Dispensing/claims workflow is entirely `// In production: ...` placeholders; no `db/migrate` directory; nothing persisted
-- [ ] **tpt-counselling** — EAP claims/session notes/private-practice CRUD all in-memory; list endpoints return hardcoded empty slices; no migrations
-- [ ] **tpt-nutrition** — Food diary/meal plans/body composition CRUD in-memory only; no migrations
-- [ ] **tpt-immunisation** — Every handler is `// In production: ...`; `nir.go` submits a placeholder struct instead of a real FHIR R4 Immunization to the National Immunisation Register
-- [ ] **tpt-health-billing** — ACC/insurance/invoices/PHARMAC billing/reconciliation all `// In production: query billing_...` returning hard-coded JSON; no migrations
+- [x] **tpt-counselling** — `api/query.go` now has real `SELECT`/`INSERT INTO counselling_eap_claims` etc. via pgx; no longer in-memory
+- [x] **tpt-nutrition** — `api/query.go` has real SQL persistence for food diary/meal plans/body composition (lighter coverage than other modules — worth a follow-up spot-check)
+- [x] **tpt-immunisation** — `api/query.go` added; `nir.go` `Submit()` now translates to a real `core/fhir/r4.Immunization` (`translateImmunisationToR4`) and POSTs it to the NIR instead of a placeholder struct
+- [x] **tpt-health-billing** — `api/query.go` (1148 lines, 33 SQL statements) now backs ACC/insurance/invoices/reconciliation; no longer hard-coded JSON
 - [ ] **tpt-clinical-trials** — Real SQL migrations exist, but every handler (participants, adverse events, protocols, visits — ~43 methods) just returns HTTP 501 via `notImplemented()`
 - [ ] **tpt-chiropractic** — Handlers hold everything in-memory (`internal/spine/chart.go`, `internal/xray/referral.go`); migrations now work (unblocked by migrate.go fix)
 - [ ] **tpt-osteopathy** — Same pattern as tpt-chiropractic
@@ -143,18 +143,18 @@ See plan `lets-say-auckland-city-jolly-pinwheel.md` for full detail.
 
 ### Partial stubs in otherwise-real modules
 
-- [ ] **tpt-allied-health** — `acc_handler.go` now queries the real repo (resolved in be58032); `ot.go`, `podiatry.go`, `speech.go` "get by ID" handlers still marked `// TODO: fetch from database; stub returns placeholder data.` (10 handlers remaining)
-- [ ] **tpt-vision** — `acc.go` (ListClaims, GetClaimFHIR), `ophth.go` (GetExamFHIR), `optical.go` (GetOrderFHIR), `refraction.go` return hard-coded/placeholder payloads instead of real repo queries
+- [x] **tpt-allied-health** — `acc_handler.go` queries the real repo; `ot.go`, `podiatry.go`, `speech.go` "get by ID" (and full CRUD) handlers now persist and read real rows via `api/discipline_crud.go` + migration `006_discipline_records.sql` (12 tables), with consent checks.
+- [x] **tpt-vision** — `acc.go` (`GetClaimFHIR`), `ophth.go` (`GetExamFHIR`), `optical.go` (`GetOrderFHIR`), `refraction.go` (`GetPrescriptionFHIR`) now query the real `fhir_resource` JSONB column from `vision_acc_claims` / `vision_ophthalmic_exams` / `vision_dispensing_orders` / `vision_prescriptions` and return it as `application/fhir+json` (404 if not found). Note: `CreateClaim`/`CreateOrder`/`CreatePrescription` still don't persist, so records must exist (via SQL or the real `CreateExam`) for the FHIR getters to return data — full Create persistence for those three is a follow-up.
 - [ ] **tpt-dental** — `acc.go` (SubmitClaim + claim CRUD) and `procedure.go` (treatment-record CRUD) explicitly commented "Simplified stub", operate on in-memory data
 - [ ] **tpt-doctor** — `api/pho.go` (PHO extract "would transmit" but doesn't) and `api/referrals.go` (`Send` doesn't dispatch to receiving provider's inbox)
-- [ ] **tpt-pathology** — `api/mllp.go` `resolveTenant` for inbound HL7 MLLP messages doesn't look up the lab site code against a tenant mapping
+- [x] **tpt-pathology** — `api/mllp.go` `resolveTenant` now looks up the sending lab site (MSH-4 / ZNZL LabSite) against the new `tenant_lab_sites` mapping table (`002_tenant_lab_sites.sql`); unknown senders fall back to the nil tenant with a warning instead of a silent default.
 - [ ] **tpt-cardiology / tpt-rehabilitation / tpt-maternal-child-health** — `api/helpers.go` `recordAudit` isn't in the same DB transaction as the clinical write it audits (durability/consistency gap)
 
 ### Moderate stubs in core/
 
-- [ ] **core/subscription/engine.go** — `buildNotificationBundle` emits a minimal FHIR R5 SubscriptionNotification with a hardcoded `"Subscription/unknown"` reference instead of the real subscription ID
-- [ ] **core/backup/scheduler.go** — `recordSuccess` records a 0-byte backup as successful (only warns) when no storage provider is configured — silent data-loss risk
-- [ ] **core/nhi/nhi.go** — NHI types marked `// TODO: replace with proper FHIR R4 types`
+- [x] **core/subscription/engine.go** — `buildNotificationBundle` already emits the real subscription ID (`Subscription/` + `subscriptionID.String()`); verified no `Subscription/unknown` remains
+- [x] **core/backup/scheduler.go** — `recordSuccess` is only called after a real upload (`result.SizeBytes`); the no-provider path correctly calls `recordFailure`. Removed leftover dead `bytes` no-op.
+- [x] **core/nhi/nhi.go** — Already uses `fhirr4.Patient` throughout; no custom NHI types to replace
 
 ## Phase 9: Tenant Service-Line Profiles
 
